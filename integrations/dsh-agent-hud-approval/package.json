@@ -1,0 +1,10 @@
+{
+  "name": "dsh-agent-hud-approval",
+  "version": "0.1.0",
+  "description": "把 DSH 的审批请求转发到 Agent HUD 原生窗口，点头/拒绝在 HUD 上完成",
+  "type": "module",
+  "main": "index.js",
+  "exports": { ".": "./index.js" },
+  "keywords": ["dsh", "plugin", "approval", "agent-hud"],
+  "license": "MIT"
+}

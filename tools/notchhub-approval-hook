@@ -1,0 +1,95 @@
+#!/usr/bin/python3 -I
+"""把智能体的审批请求转到 NotchHub 灵动岛，用户点允许/拒绝后把结果还给智能体。
+
+用法（作为智能体的钩子命令）：
+  notchhub-approval-hook --agent Claude               Claude / Codex / WorkBuddy 的 PermissionRequest
+  notchhub-approval-hook --agent Gemini --format agy  agy 的 PreToolUse
+
+NotchHub 没运行、超时或任何异常都不做决定，回到智能体自带的审批，绝不默认放行。
+"""
+import argparse, json, os, socket, stat, sys, uuid
+
+SOCK = "/tmp/agenthud-approval.sock"
+WAIT_SECONDS = 125
+MAX_TEXT = 2000
+# 这些工具的「审批」其实是问用户问题或确认计划，答案要在智能体自己的界面里填，不能转成允许/拒绝。
+INTERACTIVE_TOOLS = {"AskUserQuestion", "ExitPlanMode", "EnterPlanMode"}
+
+
+def describe(tool_input):
+    """卡片上显示的内容：命令优先，其次文件路径，否则是完整参数。"""
+    if not isinstance(tool_input, dict):
+        return str(tool_input or "")
+    for key in ("command", "CommandLine", "cmd"):
+        if isinstance(tool_input.get(key), str):
+            return tool_input[key]
+    for key in ("file_path", "path", "TargetFile", "AbsolutePath"):
+        if isinstance(tool_input.get(key), str):
+            return tool_input[key]
+    return json.dumps(tool_input, ensure_ascii=False)
+
+
+def ask(payload, path):
+    # /tmp 人人可写：只信任属于当前用户的 socket，防止别的账号抢先创建后自动放行。
+    info = os.lstat(path)
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        return None
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(WAIT_SECONDS)
+        s.connect(path)
+        s.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode())
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                return None
+            buf += chunk
+    reply = json.loads(buf.split(b"\n", 1)[0])
+    return reply.get("decision") if reply.get("id") == payload["id"] else None
+
+
+def output(decision, fmt):
+    allowed = decision == "allowed-once"
+    if decision not in ("allowed-once", "rejected"):
+        # agy 要求必须有输出；ask 就是走它自带的审批。其余格式不输出即不做决定。
+        return {"decision": "ask"} if fmt == "agy" else None
+    reason = "用户在 NotchHub 上拒绝了这个操作"
+    if fmt == "agy":
+        return {"decision": "allow"} if allowed else {"decision": "deny", "reason": reason}
+    verdict = {"behavior": "allow"} if allowed else {"behavior": "deny", "message": reason}
+    return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": verdict}}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--agent", default="智能体")
+    parser.add_argument("--format", choices=["permission-request", "agy"], default="permission-request")
+    parser.add_argument("--socket", default=SOCK)
+    args = parser.parse_args()
+    decision = None
+    try:
+        event = json.load(sys.stdin)
+        call = event.get("toolCall") or {}
+        tool = event.get("tool_name") or call.get("name") or "tool"
+        tool_input = event.get("tool_input") if "tool_input" in event else call.get("args")
+        if tool in INTERACTIVE_TOOLS:
+            return 0
+        reason = tool_input.get("description") if isinstance(tool_input, dict) else ""
+        decision = ask({
+            "id": str(uuid.uuid4()),
+            "timeoutMs": 120000,
+            "tool": str(tool),
+            "command": describe(tool_input)[:MAX_TEXT],
+            "reason": reason[:MAX_TEXT] if isinstance(reason, str) else "",
+            "agent": args.agent,
+        }, args.socket)
+    except Exception:
+        decision = None
+    result = output(decision, args.format)
+    if result is not None:
+        print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

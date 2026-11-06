@@ -1,0 +1,20 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: 编译并自测
+        run: ./build.sh
+      - name: 合盖看门狗
+        run: zsh tests/lid-watchdog-test.sh
+      - name: 审批钩子
+        run: /usr/bin/python3 -I tests/approval-hook-test.py
+      - name: 钩子安装工具
+        run: /usr/bin/python3 -I tests/approval-hooks-install-test.py
